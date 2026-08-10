@@ -20,8 +20,11 @@ h1{font-size:20px;margin:0;}
 .tab{padding:8px 14px;border:1px solid var(--line);background:var(--card);border-radius:999px;cursor:pointer;font-size:14px;color:var(--muted);user-select:none;}
 .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
 .tab-extra{display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap;}
-.gsearch{padding:7px 10px;border:1px solid var(--line);border-radius:999px;font-size:13px;width:150px;background:#fff;}
+.gsearch-wrap{position:relative;display:flex;align-items:center;}
+.gsearch{padding:7px 26px 7px 10px;border:1px solid var(--line);border-radius:999px;font-size:13px;width:150px;background:#fff;}
 .gsearch:focus{outline:none;border-color:var(--accent);}
+.gsearch-clear{position:absolute;right:6px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px;display:none;}
+.gsearch-clear.show{display:block;}
 #gcat{padding:7px 10px;border:1px solid var(--line);border-radius:999px;font-size:13px;background:#fff;font-family:inherit;}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px;}
 .periodnav{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
@@ -48,6 +51,7 @@ input[type=date]{padding:8px;font-size:13px;}
 .task.done .title{text-decoration:line-through;}
 .task .meta{display:flex;gap:6px;align-items:center;margin-top:5px;flex-wrap:wrap;}
 .tag{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--accent-soft);color:var(--accent);}
+.tag.date-tag{background:#f3f4f6;color:#374151;}
 .pri{font-size:11px;padding:2px 8px;border-radius:999px;color:#fff;}
 .memo{width:100%;margin-top:8px;border:1px dashed var(--line);border-radius:8px;padding:7px 8px;font-size:13px;resize:vertical;display:none;font-family:inherit;}
 .memo.show{display:block;}
@@ -80,7 +84,10 @@ input[type=date]{padding:8px;font-size:13px;}
     <div class="tab" data-tab="stats">대시보드</div>
     <div class="tab" data-tab="recurring">반복설정</div>
     <div class="tab-extra">
-      <input type="text" id="gsearch" class="gsearch" placeholder="🔍 검색 (제목·메모)">
+      <div class="gsearch-wrap">
+        <input type="text" id="gsearch" class="gsearch" placeholder="🔍 검색 (제목·메모)">
+        <button type="button" id="gsearchClear" class="gsearch-clear" title="검색 지우기">✕</button>
+      </div>
       <select id="gcat"><option value="">전체 분류</option></select>
     </div>
   </div>
@@ -96,7 +103,8 @@ const SUPABASE_ANON_KEY = "sb_publishable_mXF11f30001p__I2iJDJHQ_tgrwrQEK";
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* 업무 대시보드 v2 — 모든 할 일은 '날짜(date)' 하나로 관리.
-   오늘=특정 날짜 / 주간=그 주 롤업 / 월간=그 달 롤업 / 반복=매일·매주·매월 자동생성 */
+   오늘=특정 날짜 / 주간=그 주 롤업 / 월간=그 달 롤업 / 반복=매일·매주·매월 자동생성
+   검색어가 있으면 탭과 무관하게 전체 기간(최초 등록~최신) 데이터에서 찾아 보여줌. */
 
 const USE_CLOUD = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 let sb = null;
@@ -146,15 +154,10 @@ function currentRange(){
   return [new Date(d), new Date(d)];
 }
 
-// 검색어(제목/메모)와 분류 필터를 배열에 공통 적용
-function applyGlobalFilters(arr){
-  let out = arr;
-  if(state.filterCat) out = out.filter(t=>(t.category||'')===state.filterCat);
-  if(state.searchQuery){
-    const q = state.searchQuery.toLowerCase();
-    out = out.filter(t => (t.title||'').toLowerCase().includes(q) || (t.memo||'').toLowerCase().includes(q));
-  }
-  return out;
+// 분류 선택박스는 (검색과 별개로) 탭별 화면과 검색결과 화면 양쪽에 공통 적용
+function filterByCategory(arr){
+  if(!state.filterCat) return arr;
+  return arr.filter(t=>(t.category||'')===state.filterCat);
 }
 
 async function loadAll(){
@@ -193,6 +196,8 @@ async function render(){
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active', el.dataset.tab===state.tab));
   refreshGlobalControls();
   const v=id('view');
+  // 검색어가 있으면 탭·날짜와 무관하게 전체 기간 검색 결과 화면을 우선 보여줌
+  if(state.searchQuery.trim()){ v.innerHTML=renderSearchResults(); bindView(); return; }
   if(state.tab==='stats'){ v.innerHTML=renderStats(); bindView(); return; }
   if(state.tab==='recurring'){ v.innerHTML=renderRecurring(); bindView(); return; }
   const [rs,re]=currentRange();
@@ -203,11 +208,13 @@ async function render(){
   bindView();
 }
 
-// 상단 '반복설정' 오른쪽 검색창/분류 선택박스의 옵션 목록만 최신화 (입력값은 유지)
+// 상단 '반복설정' 오른쪽 검색창/분류 선택박스 — 옵션 목록만 최신화(입력값은 유지), 지우기(x) 버튼 표시 여부
 function refreshGlobalControls(){
-  const gcat=id('gcat'); if(!gcat) return;
-  const cats=[...new Set(state.tasks.map(t=>t.category).filter(Boolean))];
-  gcat.innerHTML = `<option value="">전체 분류</option>` + cats.map(c=>`<option ${state.filterCat===c?'selected':''}>${esc(c)}</option>`).join('');
+  const gcat=id('gcat'); if(gcat){
+    const cats=[...new Set(state.tasks.map(t=>t.category).filter(Boolean))];
+    gcat.innerHTML = `<option value="">전체 분류</option>` + cats.map(c=>`<option ${state.filterCat===c?'selected':''}>${esc(c)}</option>`).join('');
+  }
+  const clearBtn=id('gsearchClear'); if(clearBtn) clearBtn.classList.toggle('show', !!state.searchQuery.trim());
 }
 
 function periodLabel(){
@@ -236,6 +243,7 @@ function taskHTML(t,opt){
     <div class="body">
       <div class="title">${esc(t.title)}</div>
       <div class="meta">
+        ${opt.dateLabel?`<span class="tag date-tag">${opt.dateLabel}</span>`:''}
         <span class="pri" style="background:${p.c}">${p.t}</span>
         ${t.category?`<span class="tag">${esc(t.category)}</span>`:''}
         ${t.template_id?`<span class="tag" style="background:#f3f4f6;color:#6b7280">반복</span>`:''}
@@ -249,10 +257,35 @@ function taskHTML(t,opt){
   </div>`;
 }
 
+// 검색: 최초 등록일 ~ 최신일까지 전체 tasks에서 title/memo에 검색어가 포함된 항목을 찾아
+// 오래된 날짜 → 최신 날짜 순으로 나열 (각 항목에 날짜 태그 표시, 클릭해서 바로 체크/메모수정/삭제도 가능)
+function renderSearchResults(){
+  const q=state.searchQuery.trim().toLowerCase();
+  let arr=state.tasks.filter(t=>(t.title||'').toLowerCase().includes(q) || (t.memo||'').toLowerCase().includes(q));
+  arr=filterByCategory(arr);
+  arr=arr.slice().sort((a,b)=> String(a.date).localeCompare(String(b.date)) || String(a.created_at||'').localeCompare(String(b.created_at||'')));
+  const catLabel = state.filterCat ? ` · 분류: ${esc(state.filterCat)}` : '';
+  if(!arr.length){
+    return `<div class="card">
+      <div style="font-weight:600;margin-bottom:8px">🔍 "${esc(state.searchQuery)}" 검색 결과${catLabel}</div>
+      <div class="empty">일치하는 일정이 없어.</div>
+    </div>`;
+  }
+  const rows = arr.map(t=>{
+    const d=parseYMD(t.date);
+    const label=`${d.getFullYear()}.${pad(d.getMonth()+1)}.${pad(d.getDate())}(${WD[d.getDay()]})`;
+    return taskHTML(t,{dateLabel:label});
+  }).join('');
+  return `<div class="card">
+    <div style="font-weight:600;margin-bottom:8px">🔍 "${esc(state.searchQuery)}" 검색 결과${catLabel} — ${arr.length}건 (오래된 순)</div>
+    ${rows}
+  </div>`;
+}
+
 function renderDaily(){
   const day=ymd(state.anchor);
   let arr=state.tasks.filter(t=>t.date===day);
-  arr=applyGlobalFilters(arr);
+  arr=filterByCategory(arr);
   if(state.hideDone)  arr=arr.filter(t=>!t.done);
   arr.sort(sortTasks);
   const done=arr.filter(t=>t.done).length;
@@ -279,7 +312,7 @@ function renderDaily(){
 function renderRange(kind,rs,re){
   const a=ymd(rs), b=ymd(re);
   let arr=state.tasks.filter(t=>t.date>=a && t.date<=b);
-  arr=applyGlobalFilters(arr);
+  arr=filterByCategory(arr);
   if(state.hideDone)  arr=arr.filter(t=>!t.done);
   const total=arr.length, done=arr.filter(t=>t.done).length, pct=total?Math.round(done/total*100):0;
   const byDate={}; arr.forEach(t=>{ (byDate[t.date]=byDate[t.date]||[]).push(t); });
@@ -462,8 +495,9 @@ function bindView(){
   let searchTimer=null;
   id('gsearch').addEventListener('input',()=>{
     clearTimeout(searchTimer);
-    searchTimer=setTimeout(()=>{ state.searchQuery=id('gsearch').value.trim(); render(); },150);
+    searchTimer=setTimeout(()=>{ state.searchQuery=id('gsearch').value; render(); },150);
   });
+  id('gsearchClear').addEventListener('click',()=>{ id('gsearch').value=''; state.searchQuery=''; render(); id('gsearch').focus(); });
   id('gcat').addEventListener('change',()=>{ state.filterCat=id('gcat').value; render(); });
 
   render();
